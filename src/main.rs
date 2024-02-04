@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::{env, fs::File};
 use std::{fmt::Display, io::Read};
 
-const THRESHOLD: f64 = 50.0;
+const THRESHOLD: f64 = 70.0;
 
 #[tokio::main]
 async fn main() {
@@ -178,7 +178,7 @@ async fn generate_embedding(input: &str) -> Vec<f64> {
         user: None,
     };
 
-    println!("Generating the embedding for input: {}", input.black().on_white());
+    println!("Generating embedding for: \"{}\"", input.bright_blue());
 
     let embedding_response = client.embeddings().create(parameters).await.unwrap();
 

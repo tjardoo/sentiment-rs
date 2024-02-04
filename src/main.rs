@@ -5,8 +5,8 @@ use openai_dive::v1::{
     resources::embedding::{EmbeddingInput, EmbeddingParameters},
 };
 use serde::Serialize;
-use std::io::Read;
 use std::{env, fs::File};
+use std::{fmt::Display, io::Read};
 
 const THRESHOLD: f64 = 50.0;
 
@@ -26,38 +26,29 @@ async fn main() {
 
     let mut max_similarity = 0.0;
 
-    let mut similiarity_dictonary = Vec::<(String, f64)>::new();
+    let mut similiarity_dictonary = Vec::<(ReviewSentiment, f64)>::new();
 
     let positive_reviews = get_review_embeddings_by_sentiment(&ReviewSentiment::Positive).await;
     let negative_reviews = get_review_embeddings_by_sentiment(&ReviewSentiment::Negative).await;
 
-    for (index, review) in positive_reviews.iter().enumerate() {
+    let reviews = positive_reviews.iter().chain(negative_reviews.iter());
+
+    for (_index, review) in reviews.enumerate() {
         let dot_product = calculate_dot_product(&embedding, review.embedding.as_ref().unwrap()).await;
 
-        similiarity_dictonary.push((format!("POSITIVE-{:?}", index + 1), dot_product));
+        similiarity_dictonary.push((review.sentiment.clone(), dot_product));
 
         if max_similarity < dot_product {
             max_similarity = dot_product;
         }
     }
 
-    // @todo move this duplicated code to it's own function
-    for (index, review) in negative_reviews.iter().enumerate() {
-        let dot_product = calculate_dot_product(&embedding, review.embedding.as_ref().unwrap()).await;
-
-        similiarity_dictonary.push((format!("NEGATIVE-{:?}", index + 1), dot_product));
-
-        if max_similarity < dot_product {
-            max_similarity = dot_product;
-        }
-    }
-
-    let similiarity_dictonary: Vec<(String, f64)> = similiarity_dictonary
+    let similiarity_dictonary: Vec<(ReviewSentiment, f64)> = similiarity_dictonary
         .iter()
-        .map(|(title, dot_product)| (title.to_string(), 100.0 * (dot_product / max_similarity)))
+        .map(|(sentiment, dot_product)| (sentiment.clone(), 100.0 * (dot_product / max_similarity)))
         .collect();
 
-    for item in similiarity_dictonary {
+    for item in &similiarity_dictonary {
         if item.1 > THRESHOLD {
             println!("{}: {}", item.0, item.1.to_string().green());
         } else {
@@ -65,7 +56,17 @@ async fn main() {
         }
     }
 
-    // @todo dertmine the sentiment based on the similarity
+    similiarity_dictonary
+        .into_iter()
+        .filter(|(_, similarity)| similarity == &100.0)
+        .for_each(|(sentiment, _)| match sentiment {
+            ReviewSentiment::Positive => {
+                println!("The input is similar to a {} review", "positive".white().on_green());
+            }
+            ReviewSentiment::Negative => {
+                println!("The input is similar to a {} review.", "negative".white().on_red());
+            }
+        });
 }
 
 async fn process_generate_command() {
@@ -91,6 +92,7 @@ async fn generate_review_embeddings_by_sentiment(sentiment: ReviewSentiment) {
         let review_with_embedding = Review {
             title: review.title,
             content: review.content,
+            sentiment: review.sentiment,
             embedding: Some(embedding),
         };
 
@@ -120,6 +122,7 @@ async fn get_reviews_by_sentiment(sentiment: &ReviewSentiment) -> Vec<Review> {
         .map(|review| Review {
             title: review["title"].as_str().unwrap().to_string(),
             content: review["content"].as_str().unwrap().to_string(),
+            sentiment: sentiment.clone(),
             embedding: None,
         })
         .collect();
@@ -147,6 +150,7 @@ async fn get_review_embeddings_by_sentiment(sentiment: &ReviewSentiment) -> Vec<
         .map(|review| Review {
             title: review["title"].as_str().unwrap().to_string(),
             content: review["content"].as_str().unwrap().to_string(),
+            sentiment: sentiment.clone(),
             embedding: Some(
                 review["embedding"]
                     .as_array()
@@ -202,15 +206,26 @@ async fn calculate_dot_product(embedding1: &Vec<f64>, embedding2: &Vec<f64>) -> 
     dot_product
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "lowercase")]
 enum ReviewSentiment {
     Positive,
     Negative,
 }
 
 #[derive(Debug, Serialize)]
-#[allow(dead_code)]
 struct Review {
     title: String,
     content: String,
+    sentiment: ReviewSentiment,
     embedding: Option<Vec<f64>>,
+}
+
+impl Display for ReviewSentiment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReviewSentiment::Positive => write!(f, "positive"),
+            ReviewSentiment::Negative => write!(f, "negative"),
+        }
+    }
 }

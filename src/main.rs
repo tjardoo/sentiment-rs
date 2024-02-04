@@ -87,7 +87,7 @@ async fn generate_review_embeddings_by_sentiment(sentiment: ReviewSentiment) {
     let mut embeddings = Vec::<Review>::new();
 
     for review in reviews {
-        let embedding = generate_embedding(&review.title).await;
+        let embedding = generate_embedding(&review.content).await;
 
         let review_with_embedding = Review {
             title: review.title,

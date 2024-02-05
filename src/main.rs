@@ -5,6 +5,7 @@ use openai_dive::v1::{
     resources::embedding::{EmbeddingInput, EmbeddingParameters},
 };
 use serde::Serialize;
+use std::str::FromStr;
 use std::{env, fs::File};
 use std::{fmt::Display, io::Read};
 
@@ -14,7 +15,7 @@ const THRESHOLD: f64 = 70.0;
 async fn main() {
     let input = env::args()
         .nth(1)
-        .expect("Please provide a string to embed as an argument.");
+        .expect("Please provide a word or sentence to analyze. Use the command `generate` to generate the embeddings for the sentiments.");
 
     if input == "generate" {
         process_generate_command().await;
@@ -22,91 +23,88 @@ async fn main() {
         return;
     }
 
-    let embedding = generate_embedding(&input).await;
+    let embedding = generate_embedding(EmbeddingInputType::String(input.clone())).await;
+
+    let embedding = match embedding {
+        EmbeddingOutputType::Single(embedding) => embedding,
+        _ => panic!("Expected single embedding."),
+    };
 
     let mut max_similarity = 0.0;
 
-    let mut similiarity_dictonary = Vec::<(ReviewSentiment, f64)>::new();
+    let mut similiarity_dictonary = Vec::<(Sentiment, f64)>::new();
 
-    let positive_reviews = get_review_embeddings_by_sentiment(&ReviewSentiment::Positive).await;
-    let negative_reviews = get_review_embeddings_by_sentiment(&ReviewSentiment::Negative).await;
+    let emotions = get_emotions().await;
 
-    let reviews = positive_reviews.iter().chain(negative_reviews.iter());
+    for (_index, item) in emotions.iter().enumerate() {
+        let dot_product = calculate_dot_product(&embedding, &item.embedding).await;
 
-    for (_index, review) in reviews.enumerate() {
-        let dot_product = calculate_dot_product(&embedding, review.embedding.as_ref().unwrap()).await;
-
-        similiarity_dictonary.push((review.sentiment.clone(), dot_product));
+        similiarity_dictonary.push((item.sentiment.clone(), dot_product));
 
         if max_similarity < dot_product {
             max_similarity = dot_product;
         }
     }
 
-    let similiarity_dictonary: Vec<(ReviewSentiment, f64)> = similiarity_dictonary
+    println!("Input: {}", input.bright_blue().bold().underline());
+
+    let mut similiarity_dictonary: Vec<(Sentiment, f64)> = similiarity_dictonary
         .iter()
         .map(|(sentiment, dot_product)| (sentiment.clone(), 100.0 * (dot_product / max_similarity)))
         .collect();
 
-    for item in &similiarity_dictonary {
-        if item.1 > THRESHOLD {
-            println!("{}: {}", item.0, item.1.to_string().green());
-        } else {
-            println!("{}: {}", item.0, item.1.to_string().red());
-        }
-    }
+    similiarity_dictonary.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-    similiarity_dictonary
-        .into_iter()
-        .filter(|(_, similarity)| similarity == &100.0)
-        .for_each(|(sentiment, _)| match sentiment {
-            ReviewSentiment::Positive => {
-                println!("The input is similar to a {} review", "positive".white().on_green());
-            }
-            ReviewSentiment::Negative => {
-                println!("The input is similar to a {} review.", "negative".white().on_red());
-            }
-        });
+    similiarity_dictonary.iter().for_each(|(sentiment, similarity)| {
+        if similarity < &THRESHOLD {
+            println!("{:<12} {}", sentiment.to_string(), format!("{:.2}%", similarity).red());
+        } else {
+            println!(
+                "{:<12} {}",
+                sentiment.to_string(),
+                format!("{:.2}%", similarity).green()
+            );
+        }
+    });
 }
 
 async fn process_generate_command() {
-    let sentiment = env::args()
-        .nth(2)
-        .expect("Please provide a sentiment (positive or negative) as the 2nd argument.");
+    let sentiments = vec![
+        Sentiment::Sadness,
+        Sentiment::Happiness,
+        Sentiment::Fear,
+        Sentiment::Anger,
+        Sentiment::Suprise,
+        Sentiment::Disgust,
+    ];
 
-    match sentiment.as_str() {
-        "positive" => generate_review_embeddings_by_sentiment(ReviewSentiment::Positive).await,
-        "negative" => generate_review_embeddings_by_sentiment(ReviewSentiment::Negative).await,
-        _ => panic!("Invalid sentiment provided. Please provide either 'positive' or 'negative'."),
-    }
-}
+    let mut items = Vec::<Item>::new();
 
-async fn generate_review_embeddings_by_sentiment(sentiment: ReviewSentiment) {
-    let reviews = get_reviews_by_sentiment(&sentiment).await;
+    let text_sentiments = sentiments.iter().map(|sentiment| sentiment.to_string()).collect();
 
-    let mut embeddings = Vec::<Review>::new();
+    let embeddings = generate_embedding(EmbeddingInputType::Array(text_sentiments)).await;
 
-    for review in reviews {
-        let embedding = generate_embedding(&review.content).await;
-
-        let review_with_embedding = Review {
-            title: review.title,
-            content: review.content,
-            sentiment: review.sentiment,
-            embedding: Some(embedding),
-        };
-
-        embeddings.push(review_with_embedding);
-    }
-
-    store_embeddings_to_file(&sentiment, embeddings).await;
-}
-
-async fn get_reviews_by_sentiment(sentiment: &ReviewSentiment) -> Vec<Review> {
-    let file_path = match sentiment {
-        ReviewSentiment::Positive => "data/positive-movie-reviews.json",
-        ReviewSentiment::Negative => "data/negative-movie-reviews.json",
+    let embeddings = match embeddings {
+        EmbeddingOutputType::Multiple(embeddings) => embeddings,
+        _ => panic!("Expected multiple embeddings"),
     };
+
+    for (index, sentiment) in sentiments.iter().enumerate() {
+        items.push(Item {
+            sentiment: sentiment.clone(),
+            embedding: embeddings[index].clone(),
+        });
+    }
+
+    let file_path = "data/embedded-emotions.json";
+
+    let json = serde_json::to_string(&items).unwrap();
+
+    std::fs::write(file_path, json).unwrap();
+}
+
+async fn get_emotions() -> Vec<Item> {
+    let file_path = "data/embedded-emotions.json";
 
     let mut file = File::open(file_path).unwrap();
 
@@ -115,85 +113,64 @@ async fn get_reviews_by_sentiment(sentiment: &ReviewSentiment) -> Vec<Review> {
 
     let json: serde_json::Value = serde_json::from_str(&data).unwrap();
 
-    let reviews: Vec<Review> = json
+    let items: Vec<Item> = json
         .as_array()
         .unwrap()
         .iter()
-        .map(|review| Review {
-            title: review["title"].as_str().unwrap().to_string(),
-            content: review["content"].as_str().unwrap().to_string(),
-            sentiment: sentiment.clone(),
-            embedding: None,
+        .map(|item| Item {
+            sentiment: Sentiment::from_str(item["sentiment"].as_str().unwrap()).unwrap(),
+            embedding: item["embedding"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_f64().unwrap())
+                .collect(),
         })
         .collect();
 
-    reviews
+    items
 }
 
-async fn get_review_embeddings_by_sentiment(sentiment: &ReviewSentiment) -> Vec<Review> {
-    let file_path = match sentiment {
-        ReviewSentiment::Positive => "data/positive-movie-reviews-embeddings.json",
-        ReviewSentiment::Negative => "data/negative-movie-reviews-embeddings.json",
-    };
-
-    let mut file = File::open(file_path).unwrap();
-
-    let mut data = String::new();
-    file.read_to_string(&mut data).unwrap();
-
-    let json: serde_json::Value = serde_json::from_str(&data).unwrap();
-
-    let reviews: Vec<Review> = json
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|review| Review {
-            title: review["title"].as_str().unwrap().to_string(),
-            content: review["content"].as_str().unwrap().to_string(),
-            sentiment: sentiment.clone(),
-            embedding: Some(
-                review["embedding"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|value| value.as_f64().unwrap())
-                    .collect(),
-            ),
-        })
-        .collect();
-
-    reviews
+enum EmbeddingInputType {
+    String(String),
+    Array(Vec<String>),
 }
 
-async fn generate_embedding(input: &str) -> Vec<f64> {
+enum EmbeddingOutputType {
+    Single(Vec<f64>),
+    Multiple(Vec<Vec<f64>>),
+}
+
+async fn generate_embedding(input: EmbeddingInputType) -> EmbeddingOutputType {
     let api_key = env::var("OPENAI_API_KEY").expect("$OPENAI_API_KEY is not set");
 
     let client = Client::new(api_key);
 
+    let formatted_input = match input {
+        EmbeddingInputType::String(input) => EmbeddingInput::String(input),
+        EmbeddingInputType::Array(input) => EmbeddingInput::StringArray(input),
+    };
+
     let parameters = EmbeddingParameters {
         model: EmbeddingsEngine::TextEmbedding3Small.to_string(),
-        input: EmbeddingInput::String(input.to_string()),
+        input: formatted_input,
         encoding_format: None,
         dimensions: None,
         user: None,
     };
 
-    println!("Generating embedding for: \"{}\"", input.bright_blue());
-
     let embedding_response = client.embeddings().create(parameters).await.unwrap();
 
-    embedding_response.data[0].embedding.clone()
-}
-
-async fn store_embeddings_to_file(sentiment: &ReviewSentiment, embeddings: Vec<Review>) {
-    let file_path = match sentiment {
-        ReviewSentiment::Positive => "data/positive-movie-reviews-embeddings.json",
-        ReviewSentiment::Negative => "data/negative-movie-reviews-embeddings.json",
-    };
-
-    let json = serde_json::to_string(&embeddings).unwrap();
-
-    std::fs::write(file_path, json).unwrap();
+    match embedding_response.data.len() {
+        1 => EmbeddingOutputType::Single(embedding_response.data[0].embedding.clone()),
+        _ => EmbeddingOutputType::Multiple(
+            embedding_response
+                .data
+                .iter()
+                .map(|item| item.embedding.clone())
+                .collect(),
+        ),
+    }
 }
 
 async fn calculate_dot_product(embedding1: &Vec<f64>, embedding2: &Vec<f64>) -> f64 {
@@ -208,24 +185,46 @@ async fn calculate_dot_product(embedding1: &Vec<f64>, embedding2: &Vec<f64>) -> 
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "lowercase")]
-enum ReviewSentiment {
-    Positive,
-    Negative,
+enum Sentiment {
+    Sadness,
+    Happiness,
+    Fear,
+    Anger,
+    Suprise,
+    Disgust,
 }
 
 #[derive(Debug, Serialize)]
-struct Review {
-    title: String,
-    content: String,
-    sentiment: ReviewSentiment,
-    embedding: Option<Vec<f64>>,
+struct Item {
+    sentiment: Sentiment,
+    embedding: Vec<f64>,
 }
 
-impl Display for ReviewSentiment {
+impl Display for Sentiment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReviewSentiment::Positive => write!(f, "positive"),
-            ReviewSentiment::Negative => write!(f, "negative"),
+            Sentiment::Sadness => write!(f, "😔 Sadness"),
+            Sentiment::Happiness => write!(f, "😄 Happiness"),
+            Sentiment::Fear => write!(f, "😨 Fear"),
+            Sentiment::Anger => write!(f, "😠 Anger"),
+            Sentiment::Suprise => write!(f, "😮 Suprise"),
+            Sentiment::Disgust => write!(f, "🤮 Disgust"),
+        }
+    }
+}
+
+impl FromStr for Sentiment {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "sadness" => Ok(Sentiment::Sadness),
+            "happiness" => Ok(Sentiment::Happiness),
+            "fear" => Ok(Sentiment::Fear),
+            "anger" => Ok(Sentiment::Anger),
+            "suprise" => Ok(Sentiment::Suprise),
+            "disgust" => Ok(Sentiment::Disgust),
+            _ => Err(()),
         }
     }
 }

@@ -24,11 +24,11 @@ This will calulcate the similarity between the input text and the 6 basic emotio
 
 This will show a result similar to the following:
 
-![Terminal screenshot](docs/terminal-screenshot.png)
+![Terminal screenshot](docs/emotions-terminal-screenshot.png)
 
 The current implementation uses a **threshold of 70.0**. This threshold can be adjusted in the `main.rs` file.
 
-## Preparation
+## Re-generating the embeddings
 
 To re-generate the embeddings for the 6 basic emotions, use the following command:
 
